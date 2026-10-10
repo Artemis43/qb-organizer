@@ -13,9 +13,12 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
+from typing import Optional
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from config import settings
@@ -33,6 +36,34 @@ from matching.matcher import match_questions_to_chapters
 from export.json_exporter import export_subject
 from core import embedder
 from answers.generator import generate_answers, regenerate_answer, PRESETS
+
+# ── API Models ────────────────────────────────────────────────────
+
+
+class GenerateRequest(BaseModel):
+    """POST /api/answers/generate body."""
+    mapping_ids: list[str]
+    force_regenerate: bool = False
+
+
+class GenerateResponse(BaseModel):
+    """POST /api/answers/generate response (SSE follows over /api/progress/{task_id})."""
+    task_id: str
+    message: str
+
+
+class PurgeRequest(BaseModel):
+    """POST /api/answers/purge body."""
+    subject: Optional[str] = None
+    confirm: bool = False
+
+
+class PurgeReportResponse(BaseModel):
+    """POST /api/answers/purge response."""
+    answers_deleted: int
+    mappings_reset: int
+    firestore_documents_deleted: int
+
 
 # ── Logging Setup ─────────────────────────────────────────────────
 
@@ -692,6 +723,8 @@ async def get_settings():
         "haiku_model": env.get("HAIKU_MODEL", settings.haiku_model),
         "sonnet_model": env.get("SONNET_MODEL", settings.sonnet_model),
         "budget_limit": float(env.get("BUDGET_LIMIT", settings.budget_limit)),
+        "batch_cost_ceiling_usd": float(env.get("BATCH_COST_CEILING_USD", settings.batch_cost_ceiling_usd)),
+        "daily_cost_ceiling_usd": float(env.get("DAILY_COST_CEILING_USD", settings.daily_cost_ceiling_usd)),
         "confidence_high": float(env.get("CONFIDENCE_HIGH", settings.confidence_high)),
         "confidence_low": float(env.get("CONFIDENCE_LOW", settings.confidence_low)),
         "chunk_size": int(env.get("CHUNK_SIZE", settings.chunk_size)),
@@ -726,6 +759,8 @@ async def update_settings(data: dict):
         "haiku_model": "HAIKU_MODEL",
         "sonnet_model": "SONNET_MODEL",
         "budget_limit": "BUDGET_LIMIT",
+        "batch_cost_ceiling_usd": "BATCH_COST_CEILING_USD",
+        "daily_cost_ceiling_usd": "DAILY_COST_CEILING_USD",
         "confidence_high": "CONFIDENCE_HIGH",
         "confidence_low": "CONFIDENCE_LOW",
         "chunk_size": "CHUNK_SIZE",
@@ -768,6 +803,10 @@ async def update_settings(data: dict):
             settings.confidence_low = float(data["confidence_low"])
         if "budget_limit" in changed:
             settings.budget_limit = float(data["budget_limit"])
+        if "batch_cost_ceiling_usd" in changed:
+            settings.batch_cost_ceiling_usd = float(data["batch_cost_ceiling_usd"])
+        if "daily_cost_ceiling_usd" in changed:
+            settings.daily_cost_ceiling_usd = float(data["daily_cost_ceiling_usd"])
         if "chunk_size" in changed:
             settings.chunk_size = int(data["chunk_size"])
         if "chunk_overlap" in changed:
@@ -1764,21 +1803,16 @@ async def api_kg_get_concept(concept_id: str):
 async def api_kg_graph(
     subject: str = None,
     concept_type: str = None,
-    limit: int = 150,
+    limit: int = 5000,
 ):
     """Get graph data (nodes + edges) for visualization."""
-    if not subject:
-        # Default to first subject that has concepts
-        subjects = await database.fetch_all("textbooks")
-        subject_names = list({tb["subject"] for tb in subjects})
-        if not subject_names:
-            return {"nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0}
-        subject = subject_names[0]
+    if subject == "":
+        subject = None
 
     graph = await get_graph_for_subject(
         subject=subject,
         concept_type=concept_type,
-        limit=min(limit, 1000),
+        limit=limit,
     )
     return graph
 

@@ -336,6 +336,43 @@ async def init_db():
             except Exception:
                 pass
 
+        # Migration: medical-grade answer pipeline columns on answers table (R1, R2, R3,
+        # R5, R6, R9, R11, R12, R13). Each ALTER runs inside its own try/except so the
+        # loop is idempotent — `aiosqlite.OperationalError` is raised when a column
+        # already exists, which we silently absorb.
+        NEW_ANSWER_COLS = [
+            ("sections", "TEXT"),
+            ("markdown", "TEXT"),
+            ("coverage_mode", "TEXT"),
+            ("question_intent", "TEXT"),
+            ("focus_topic", "TEXT"),
+            ("requested_item_count", "INTEGER"),
+            ("intent_confidence_low", "INTEGER DEFAULT 0"),
+            ("provenance", "TEXT"),
+            ("mandatory_data_complete", "INTEGER DEFAULT 1"),
+            ("vsaq_disambiguation_fallback", "INTEGER DEFAULT 0"),
+            ("kg_skeleton_used", "INTEGER DEFAULT 0"),
+        ]
+        for col, decl in NEW_ANSWER_COLS:
+            try:
+                await db.execute(f"ALTER TABLE answers ADD COLUMN {col} {decl}")
+                await db.commit()
+                logger.info(f"Migration: added '{col}' column to answers table")
+            except aiosqlite.OperationalError:
+                pass  # column already exists — idempotent
+
+        # New table for daily cost ceiling tracking (R9)
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_cost_log (
+                date TEXT PRIMARY KEY,
+                total_usd REAL DEFAULT 0,
+                calls_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        await db.commit()
+
     logger.info(f"Database initialized at {DB_PATH}")
 
 

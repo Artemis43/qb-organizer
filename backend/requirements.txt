@@ -40,3 +40,8 @@ imagekitio==3.1.1
 
 # === Firebase (Firestore push) ===
 firebase-admin>=6.0.0
+
+# === Testing ===
+pytest==8.3.4
+pytest-asyncio==0.25.0
+hypothesis==6.122.3

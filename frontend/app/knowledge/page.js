@@ -692,7 +692,7 @@ export default function KnowledgeGraphPage() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [textbooks, setTextbooks] = useState([]);
   const [stats, setStats] = useState(null);
-  const [graphLimit, setGraphLimit] = useState(150);
+  const [graphLimit, setGraphLimit] = useState(10000);
   // State
 
   const [selSubject, setSelSubject] = useState("");
@@ -761,11 +761,11 @@ export default function KnowledgeGraphPage() {
   useEffect(() => { loadData(); }, []);
   
   useEffect(() => {
-    setGraphLimit(150);
+    setGraphLimit(10000);
   }, [selSubject, selTypeFilter]);
 
   useEffect(() => {
-    if (selSubject && tab === "graph") loadGraph();
+    if (tab === "graph") loadGraph();
   }, [selSubject, selTypeFilter, tab, graphLimit]);
 
   // Escape key handler for fullscreen mode
@@ -1248,11 +1248,11 @@ export default function KnowledgeGraphPage() {
               {selSubject && <span style={{ color: "var(--accent)", fontWeight: 500 }}>· {selSubject}</span>}
             </div>
 
-            {graphData.total_db_nodes > (graphData.nodes || []).length && (graphData.nodes || []).length < 1000 && (
+            {graphData.total_db_nodes > (graphData.nodes || []).length && (
               <button
                 className="btn btn-xs btn-primary"
                 style={{ height: "auto", padding: "4px 8px", fontSize: 10, borderRadius: 6, display: "flex", alignItems: "center", gap: 4 }}
-                onClick={() => setGraphLimit(prev => Math.min(prev + 150, 1000))}
+                onClick={() => setGraphLimit(prev => prev + 5000)}
               >
                 <span>➕</span> Load More
               </button>

@@ -1063,15 +1063,21 @@ async def search_concepts(
     return output
 
 
-async def get_graph_for_subject(subject: str, concept_type: str = None, limit: int = 200) -> dict:
+async def get_graph_for_subject(subject: str = None, concept_type: str = None, limit: int = 200) -> dict:
     """Return graph data (nodes + edges) for visualization."""
-    where = "subject = ?"
-    params = [subject]
+    clauses = []
+    params = []
+    if subject:
+        clauses.append("subject = ?")
+        params.append(subject)
     if concept_type:
-        where += " AND concept_type = ?"
+        clauses.append("concept_type = ?")
         params.append(concept_type)
 
-    concepts_all = await database.fetch_all("concepts", where, tuple(params), "frequency DESC")
+    where = " AND ".join(clauses) if clauses else ""
+    params_tuple = tuple(params)
+
+    concepts_all = await database.fetch_all("concepts", where, params_tuple, "frequency DESC")
     total_db_nodes = len(concepts_all)
     concepts = concepts_all[:limit]
     concept_ids = {c["id"] for c in concepts}

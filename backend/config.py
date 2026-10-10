@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     haiku_model: str = "claude-haiku-4-5-20251001"
     sonnet_model: str = "claude-sonnet-4-6-20250610"
 
+    # --- Cost Ceiling (Medical-Grade Answer Pipeline R9) ---
+    batch_cost_ceiling_usd: float = 0.50
+    daily_cost_ceiling_usd: float = 5.00
+
     # --- Embedding ---
     embedding_model: str = "pritamdeka/PubMedBERT-mnli-snli-scinli-scitail-mednli-stsb"
 

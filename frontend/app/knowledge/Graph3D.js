@@ -31,41 +31,12 @@ export default function Graph3D({ nodes, edges, onSelectNode, selectedNodeId, he
   const [dimensions, setDimensions] = useState({ width: 800, height: typeof height === "number" ? height : 520 });
   const containerRef = useRef(null);
 
-  const toggleFreeze = () => {
-    if (!fgRef.current) return;
-    if (isFrozen) {
-      fgRef.current.resumeAnimation();
-      fgRef.current.d3ReheatSimulation();
-      setIsFrozen(false);
-    } else {
-      fgRef.current.pauseAnimation();
-      fgRef.current.d3StopSimulation();
-      setIsFrozen(true);
-    }
-  };
-
-  useEffect(() => {
-    if (isFrozen && fgRef.current) {
-      fgRef.current.resumeAnimation();
-      setIsFrozen(false);
-    }
-  }, [nodes, edges]);
-
-  // Resize handler to fit container
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (let entry of entries) {
-        const { width, height: observedHeight } = entry.contentRect;
-        setDimensions({
-          width: width || 800,
-          height: observedHeight || (typeof height === "number" ? height : 520),
-        });
-      }
-    });
-    resizeObserver.observe(containerRef.current);
-    return () => resizeObserver.disconnect();
-  }, [height]);
+  // Performance caches for ThreeJS objects to support 1000 concepts smoothly
+  const spriteCache = useRef(new Map());
+  const sphereGeometries = useRef({});
+  const haloGeometries = useRef({});
+  const sphereMaterials = useRef({});
+  const haloMaterials = useRef({});
 
   // Format data for react-force-graph-3d (shallow clone to prevent mutating react state)
   const graphData = useMemo(() => {
@@ -94,6 +65,142 @@ export default function Graph3D({ nodes, edges, onSelectNode, selectedNodeId, he
       })),
     };
   }, [nodes, edges]);
+
+  // Map node neighbors for Level-Of-Detail (LOD) interactive labeling
+  const nodeNeighbors = useMemo(() => {
+    const neighbors = new Map();
+    (graphData.links || []).forEach(link => {
+      const sourceId = typeof link.source === "object" ? link.source.id : link.source;
+      const targetId = typeof link.target === "object" ? link.target.id : link.target;
+      
+      if (!neighbors.has(sourceId)) neighbors.set(sourceId, new Set());
+      if (!neighbors.has(targetId)) neighbors.set(targetId, new Set());
+      
+      neighbors.get(sourceId).add(targetId);
+      neighbors.get(targetId).add(sourceId);
+    });
+    return neighbors;
+  }, [graphData.links]);
+
+  const activeNeighbors = useMemo(() => {
+    const set = new Set();
+    if (selectedNodeId && nodeNeighbors.has(selectedNodeId)) {
+      nodeNeighbors.get(selectedNodeId).forEach(id => set.add(id));
+    }
+    if (hoveredNodeId && nodeNeighbors.has(hoveredNodeId)) {
+      nodeNeighbors.get(hoveredNodeId).forEach(id => set.add(id));
+    }
+    return set;
+  }, [selectedNodeId, hoveredNodeId, nodeNeighbors]);
+
+  // Clean up cached WebGL objects when graph data changes to prevent leaks
+  useEffect(() => {
+    spriteCache.current.forEach((group) => {
+      group.traverse((child) => {
+        if (child instanceof THREE.Sprite && child.material) {
+          if (child.material.map) {
+            child.material.map.dispose();
+          }
+          child.material.dispose();
+        }
+      });
+    });
+    spriteCache.current.clear();
+    sphereGeometries.current = {};
+    haloGeometries.current = {};
+    sphereMaterials.current = {};
+    haloMaterials.current = {};
+  }, [nodes, edges]);
+
+  const getSphereGeometry = (r) => {
+    const key = `${r}`;
+    if (!sphereGeometries.current[key]) {
+      // Dynamic segments optimized for 1600+ nodes (tiny standard/advanced nodes use 6-8, center/must-know use 12)
+      const segments = r < 5 ? 6 : (r < 7.5 ? 10 : 12);
+      sphereGeometries.current[key] = new THREE.SphereGeometry(r, segments, segments);
+    }
+    return sphereGeometries.current[key];
+  };
+
+  const getHaloGeometry = (r) => {
+    const key = `${r}`;
+    if (!haloGeometries.current[key]) {
+      haloGeometries.current[key] = new THREE.SphereGeometry(r, 10, 10);
+    }
+    return haloGeometries.current[key];
+  };
+
+  const getSphereMaterial = (color, isSel, isHov) => {
+    const key = `${color}_${isSel}_${isHov}`;
+    if (!sphereMaterials.current[key]) {
+      sphereMaterials.current[key] = new THREE.MeshPhongMaterial({
+        color: color,
+        transparent: true,
+        opacity: isSel || isHov ? 0.95 : 0.75,
+        shininess: 80,
+        emissive: color,
+        emissiveIntensity: isSel ? 0.5 : (isHov ? 0.35 : 0.1),
+      });
+    }
+    return sphereMaterials.current[key];
+  };
+
+  const getHaloMaterial = (color, isSel) => {
+    const key = `${color}_${isSel}`;
+    if (!haloMaterials.current[key]) {
+      haloMaterials.current[key] = new THREE.MeshBasicMaterial({
+        color: color,
+        wireframe: true,
+        transparent: true,
+        opacity: isSel ? 0.35 : 0.2,
+      });
+    }
+    return haloMaterials.current[key];
+  };
+
+  const toggleFreeze = () => {
+    if (!fgRef.current) return;
+    if (isFrozen) {
+      // Unfreeze layout: remove fx, fy, fz coordinates locks so D3 simulation flows again
+      graphData.nodes.forEach(n => {
+        delete n.fx;
+        delete n.fy;
+        delete n.fz;
+      });
+      fgRef.current.d3ReheatSimulation();
+      setIsFrozen(false);
+    } else {
+      // Freeze layout: lock fx, fy, fz coordinates to current positions to stop simulation ticks
+      graphData.nodes.forEach(n => {
+        n.fx = n.x;
+        n.fy = n.y;
+        n.fz = n.z;
+      });
+      setIsFrozen(true);
+    }
+  };
+
+  useEffect(() => {
+    if (isFrozen) {
+      setIsFrozen(false);
+    }
+  }, [nodes, edges]);
+
+  // Resize handler to fit container
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        const { width, height: observedHeight } = entry.contentRect;
+        setDimensions({
+          width: width || 800,
+          height: observedHeight || (typeof height === "number" ? height : 520),
+        });
+      }
+    });
+    resizeObserver.observe(containerRef.current);
+    return () => resizeObserver.disconnect();
+  }, [height]);
 
   // Adjust forces once simulation starts
   useEffect(() => {
@@ -194,48 +301,65 @@ export default function Graph3D({ nodes, edges, onSelectNode, selectedNodeId, he
     handleResetCamera();
   }, [onSelectNode]);
 
-  // Node custom object renderer: sphere + halo + crisp text sprite
+  // Node custom object renderer: sphere + halo + crisp text sprite (with performance caching)
   const nodeThreeObject = useCallback(
     (node) => {
       const isSel = node.id === selectedNodeId;
       const isHov = node.id === hoveredNodeId;
       const isCtr = node.is_center;
+      const isNeighbor = activeNeighbors.has(node.id);
       
+      const cacheKey = `${node.id}_${isSel}_${isHov}_${isNeighbor}_${showLabels}`;
+      if (spriteCache.current.has(cacheKey)) {
+        return spriteCache.current.get(cacheKey);
+      }
+
+      // DISPOSE OLD CACHED GROUPS FOR THIS NODE ID TO PREVENT MEMORY LEAKS
+      const prefix = `${node.id}_`;
+      for (const key of spriteCache.current.keys()) {
+        if (key.startsWith(prefix) && key !== cacheKey) {
+          const oldGroup = spriteCache.current.get(key);
+          if (oldGroup) {
+            oldGroup.traverse((child) => {
+              if (child instanceof THREE.Sprite && child.material) {
+                if (child.material.map) {
+                  child.material.map.dispose();
+                }
+                child.material.dispose();
+              }
+            });
+          }
+          spriteCache.current.delete(key);
+        }
+      }
+
+      const group = new THREE.Group();
+
       // Map base size according to importance
       const impSize = { must_know: 7.5, standard: 5, advanced: 3.5 };
       const radius = isCtr ? 10 : (impSize[node.importance] || 5);
       const color = TYPE_COLORS[node.concept_type] || TYPE_COLORS.other;
 
-      const group = new THREE.Group();
-
-      // 1. Central sphere
-      const sphereGeom = new THREE.SphereGeometry(radius, 24, 24);
-      const sphereMat = new THREE.MeshPhongMaterial({
-        color: color,
-        transparent: true,
-        opacity: isSel || isHov ? 0.95 : 0.75,
-        shininess: 80,
-        emissive: color,
-        emissiveIntensity: isSel ? 0.5 : (isHov ? 0.35 : 0.1),
-      });
+      // 1. Central sphere (Reusing cached geometry and material)
+      const sphereGeom = getSphereGeometry(radius);
+      const sphereMat = getSphereMaterial(color, isSel, isHov);
       const sphereMesh = new THREE.Mesh(sphereGeom, sphereMat);
       group.add(sphereMesh);
 
-      // 2. High-Tech wireframe halo for selection or hover
+      // 2. High-Tech wireframe halo for selection or hover (Reusing cached geometry and material)
       if (isSel || isHov) {
-        const haloGeom = new THREE.SphereGeometry(radius * 1.55, 10, 10);
-        const haloMat = new THREE.MeshBasicMaterial({
-          color: isSel ? "#ffffff" : color,
-          wireframe: true,
-          transparent: true,
-          opacity: isSel ? 0.35 : 0.2,
-        });
+        const haloGeom = getHaloGeometry(radius * 1.55);
+        const haloMat = getHaloMaterial(isSel ? "#ffffff" : color, isSel);
         const haloMesh = new THREE.Mesh(haloGeom, haloMat);
         group.add(haloMesh);
       }
 
-      // 3. Crisp text sprite
-      if (showLabels || isSel || isHov) {
+      // 3. Crisp text sprite (Only render text if important or in active neighbor group to optimize texture memory)
+      const shouldRenderLabel = showLabels && (
+        isSel || isHov || isCtr || isNeighbor || node.importance === "must_know"
+      );
+
+      if (shouldRenderLabel) {
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
         
@@ -278,9 +402,10 @@ export default function Graph3D({ nodes, edges, onSelectNode, selectedNodeId, he
         group.add(labelSprite);
       }
 
+      spriteCache.current.set(cacheKey, group);
       return group;
     },
-    [selectedNodeId, hoveredNodeId, showLabels]
+    [selectedNodeId, hoveredNodeId, showLabels, activeNeighbors]
   );
 
   // Link relation labels generator
@@ -450,25 +575,44 @@ export default function Graph3D({ nodes, edges, onSelectNode, selectedNodeId, he
 
         // Link/Edge config
         linkColor={() => "rgba(96, 165, 250, 0.12)"}
-        linkWidth={1.2}
+        linkWidth={(link) => {
+          const sourceId = typeof link.source === "object" ? link.source.id : link.source;
+          const targetId = typeof link.target === "object" ? link.target.id : link.target;
+          const isRelated = sourceId === selectedNodeId || targetId === selectedNodeId || 
+                            sourceId === hoveredNodeId || targetId === hoveredNodeId;
+          return isRelated ? 1.5 : 0;
+        }}
         linkLabel={(link) => `${link.relation_type.replace(/_/g, ' ')} (${Math.round((link.confidence || 0.9) * 100)}% confidence)`}
-        linkDirectionalArrowLength={4}
+        linkDirectionalArrowLength={(link) => {
+          const sourceId = typeof link.source === "object" ? link.source.id : link.source;
+          const targetId = typeof link.target === "object" ? link.target.id : link.target;
+          const isRelated = sourceId === selectedNodeId || targetId === selectedNodeId || 
+                            sourceId === hoveredNodeId || targetId === hoveredNodeId;
+          return isRelated ? 4 : 0;
+        }}
         linkDirectionalArrowColor={() => "rgba(96, 165, 250, 0.4)"}
         linkDirectionalArrowRelPos={1} // Put arrow head directly at target node edge
         linkThreeObject={showEdgeLabels ? linkThreeObject : null}
         linkPositionUpdate={showEdgeLabels ? linkPositionUpdate : null}
 
-        // Premium particle animation flow along relations
-        linkDirectionalParticles={enableParticles ? 2 : 0}
+        // Premium particle animation flow along relations (restricted to active paths for 60fps performance)
+        linkDirectionalParticles={(link) => {
+          if (!enableParticles) return 0;
+          const sourceId = typeof link.source === "object" ? link.source.id : link.source;
+          const targetId = typeof link.target === "object" ? link.target.id : link.target;
+          const isRelated = sourceId === selectedNodeId || targetId === selectedNodeId || 
+                            sourceId === hoveredNodeId || targetId === hoveredNodeId;
+          return isRelated ? 2 : 0;
+        }}
         linkDirectionalParticleWidth={1.8}
         linkDirectionalParticleSpeed={0.012}
         linkDirectionalParticleColor={(link) => TYPE_COLORS[link.relation_type] || "#818cf8"}
 
-        // Simulation parameters
-        cooldownTicks={100}
-        warmupTicks={50}
-        d3AlphaDecay={0.04}
-        d3VelocityDecay={0.3}
+        // Simulation parameters optimized for rapid stabilization
+        cooldownTicks={120}
+        warmupTicks={80}
+        d3AlphaDecay={0.08}
+        d3VelocityDecay={0.4}
         onBackgroundClick={handleBackgroundClick}
       />
     </div>
